@@ -27,6 +27,7 @@
     --field-b:#356F41;
     --line:rgba(255,255,255,.75);
     --radius:10px;
+    --radius-sm:8px;
     --shadow:0 2px 8px rgba(40,30,20,.14);
   }
   *{box-sizing:border-box;}
@@ -252,14 +253,12 @@
   /* Stats Manager */
   .stat-card-row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:10px;}
   .stat-player-card{
-    background:#fff;border:1px solid var(--gray-300);border-radius:var(--radius-sm);
-    padding:10px 12px;min-width:92px;max-width:140px;text-align:center;cursor:pointer;
+    background:#fff;border:1px solid var(--gray-300);border-radius:16px;
+    padding:13px 10px;min-width:80px;max-width:130px;text-align:center;cursor:pointer;
     box-shadow:var(--shadow);
   }
   .stat-player-card:active{transform:scale(.97);}
-  .stat-player-card .spc-pos{font-size:.62rem;font-weight:800;color:var(--marigold-dark);letter-spacing:.5px;}
-  .stat-player-card .spc-name{font-weight:700;font-size:.86rem;color:var(--gray-900);margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .stat-player-card .spc-tally{font-size:.66rem;color:var(--gray-500);line-height:1.3;}
+  .stat-player-card .spc-name{font-weight:700;font-size:.94rem;color:var(--gray-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
   .lib-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--gray-150);}
   .lib-row:last-child{border-bottom:none;}
@@ -342,18 +341,21 @@
   .trash-btn:hover{color:var(--maroon);}
   .trash-btn.armed{background:var(--maroon);color:#fff;}
   .trash-btn svg{width:18px;height:18px;}
-  .stat-row{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--gray-150);}
-  .stat-row:last-child{border-bottom:none;}
+  #statEntryList{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;}
+  .stat-row{
+    display:flex;align-items:center;justify-content:space-between;gap:6px;
+    padding:6px 8px;border:1px solid var(--gray-150);border-radius:12px;background:var(--gray-100);
+  }
   .stat-btn{
-    width:42px;height:42px;border-radius:50%;border:2px solid var(--maroon);background:#fff;
-    color:var(--maroon);font-size:1.4rem;font-weight:800;cursor:pointer;flex-shrink:0;
+    width:34px;height:34px;border-radius:50%;border:2px solid var(--maroon);background:#fff;
+    color:var(--maroon);font-size:1.15rem;font-weight:800;cursor:pointer;flex-shrink:0;
     display:flex;align-items:center;justify-content:center;line-height:1;
   }
   .stat-btn:active{background:var(--maroon);color:#fff;}
-  .stat-center{flex:1;text-align:center;padding:0 10px;min-width:0;}
-  .stat-center .stat-name{font-weight:700;font-size:.92rem;color:var(--gray-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .stat-center .stat-count{font-size:1.9rem;color:var(--maroon);line-height:1.1;margin:2px 0;}
-  .stat-center .stat-desc{font-size:.72rem;color:var(--gray-500);font-weight:500;}
+  .stat-center{flex:1;text-align:center;padding:0 4px;min-width:0;}
+  .stat-center .stat-name{font-weight:700;font-size:.76rem;color:var(--gray-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .stat-center .stat-count{font-size:1.3rem;color:var(--maroon);line-height:1.1;margin:1px 0;}
+  .stat-center .stat-desc{font-size:.62rem;color:var(--gray-500);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
   /* Advance sub planning */
   .plan-row{
@@ -2553,7 +2555,6 @@ function renderStatPlayerRows(){
   if(!container) return;
   container.innerHTML = "";
   const rows = formationRows(state.formation);
-  const fields = state.game.statFields || [];
   let anyPlayer = false;
   rows.forEach(rowSlots=>{
     const filled = rowSlots.filter(slot=>state.game.onField[slot.id]);
@@ -2573,14 +2574,8 @@ function renderStatPlayerRows(){
         card.style.borderColor = color;
         card.style.color = "#fff";
       }
-      const tally = fields.map(f=>{
-        const v = (state.game.postGameStats[pid]||{})[f] || 0;
-        return f+": "+v;
-      }).join(" · ");
       card.innerHTML =
-        '<div class="spc-pos" style="color:'+(color?'rgba(255,255,255,.9)':'var(--marigold-dark)')+';">'+slot.label+'</div>'+
-        '<div class="spc-name" style="color:'+(color?'#fff':'var(--gray-900)')+';">'+p.name+'</div>'+
-        '<div class="spc-tally" style="color:'+(color?'rgba(255,255,255,.85)':'var(--gray-500)')+';">'+(tally||"Tap to add stats")+'</div>';
+        '<div class="spc-name" style="color:'+(color?'#fff':'var(--gray-900)')+';">'+p.name+'</div>';
       card.addEventListener("click",()=>openStatEntryModal(pid));
       rowEl.appendChild(card);
     });
