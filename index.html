@@ -408,7 +408,7 @@
   }
   .overlay-card h2{color:var(--maroon);font-size:1.4rem;}
 
-  .summary-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--gray-150);}
+  .summary-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--gray-150);}
   .summary-row .bar-wrap{flex:1;background:var(--gray-150);border-radius:6px;height:14px;overflow:hidden;}
   .summary-row .bar{height:100%;background:linear-gradient(90deg,var(--marigold),var(--maroon));}
   .summary-row .sname{width:90px;font-weight:600;font-size:.85rem;flex-shrink:0;}
@@ -684,6 +684,8 @@
       <div class="card">
         <h2>Games Logged <small>Every match you've saved.</small></h2>
         <div id="seasonGamesList"></div>
+        <button class="btn btn-outline btn-block" id="downloadSeasonBtn" style="margin-top:12px;">Download All Season Stats (Backup)</button>
+        <p class="note" style="margin:6px 0 0;">Saves every game — minutes, positions, and stats — to a file on this device, so an app update can never lose what's already been recorded.</p>
       </div>
     </div>
 
@@ -780,7 +782,8 @@
       </div>
       <p class="note" id="gameDetailSub" style="margin-top:0;"></p>
       <div id="gameDetailList"></div>
-      <button class="btn btn-outline btn-block" id="deleteGameBtn" style="margin-top:14px; color:var(--maroon); border-color:var(--maroon);">Delete This Game</button>
+      <button class="btn btn-outline btn-block" id="downloadGameBtn" style="margin-top:14px;">Download This Game (CSV)</button>
+      <button class="btn btn-outline btn-block" id="deleteGameBtn" style="margin-top:10px; color:var(--maroon); border-color:var(--maroon);">Delete This Game</button>
     </div>
   </div>
 
@@ -900,8 +903,11 @@ function defaultState(){
       playTime:{},        // playerId -> total seconds accumulated across the whole game
       playTimeByHalf:{1:{}, 2:{}}, // playerId -> seconds, split out per half for the Playing Time toggle
       positionsPlayed:{}, // playerId -> array of unique category codes (GK/DF/MF/FW) played this game
+      positionTime:{},    // playerId -> {GK:secs, DF:secs, MF:secs, FW:secs}, ticked alongside playTime
       statFields:["Goals","Assists"], // this game's post-game stat columns — edit freely per game
-      postGameStats:{},   // playerId -> {fieldName:number}
+      postGameStats:{},   // playerId -> {fieldName:number} — derived total, see statEvents
+      statEvents:[],       // {id, playerId, fieldName, delta, half, atSec, position} — one entry per +/- tap,
+                            // the source of truth postGameStats totals are summed from
       savedToSeason:false,
       benchOrder:[],      // array of playerIds, manual sub-in priority override for the live game bench
       plannedSubs:[],     // array of {offId, onId}, coach-planned pairings set up ahead of the timer
@@ -915,6 +921,8 @@ let state = load() || defaultState();
 if(!state.game.benchOrder) state.game.benchOrder = [];
 if(!state.game.plannedSubs) state.game.plannedSubs = [];
 if(!state.game.positionsPlayed) state.game.positionsPlayed = {};
+if(!state.game.positionTime) state.game.positionTime = {};
+if(!state.game.statEvents) state.game.statEvents = [];
 if(!state.game.playTimeByHalf) state.game.playTimeByHalf = {1:{}, 2:{}};
 if(!state.game.playTimeByHalf[1]) state.game.playTimeByHalf[1] = {};
 if(!state.game.playTimeByHalf[2]) state.game.playTimeByHalf[2] = {};
@@ -1037,67 +1045,67 @@ function scheduleSyncPush(){
 
 function deepClone(v){ return v==null ? v : JSON.parse(JSON.stringify(v)); }
 function deepEqualJSON(a,b){ return JSON.stringify(a)===JSON.stringify(b); }
-function getPath(obj, path){ return path.reduce((o,k)=> (o==null?o:o[k]), obj); }
-function setPath(obj, path, val){
-  let o = obj;
-  for(let i=0;i<path.length-1;i++){
-    if(o[path[i]]==null) o[path[i]] = {};
-    o = o[path[i]];
-  }
-  o[path[path.length-1]] = val;
-}
+function isPlainObj(v){ return !!v && typeof v==="object" && !Array.isArray(v); }
 
-// Union-merges an id-keyed array field of `merged` (which starts as a clone of
-// remote): an item this device added or edited since `base` wins for that item;
-// an item this device deleted since `base` is removed too; anything only the
-// other device touched passes through from remote untouched.
-function mergeArrayById(merged, local, base, path, idKey){
-  const localArr = getPath(local, path) || [];
-  const baseArr  = getPath(base, path)  || [];
-  const mergedArr = (getPath(merged, path) || []).slice();
+// Registered id-keyed arrays, by dotted path from the state root. These merge
+// item-by-item (add/edit/delete tracked per id) instead of as one atomic value,
+// so e.g. two coaches editing different players — or tapping stats for
+// different players — at the same moment don't erase each other's edit.
+const SYNC_ID_ARRAYS = {
+  "players": "id",
+  "seasonStats.games": "id",
+  "statLibrary": "name",
+  "game.statEvents": "id",
+};
 
-  const baseById  = new Map(baseArr.map(item=>[item[idKey], item]));
-  const localById = new Map(localArr.map(item=>[item[idKey], item]));
+function mergeArrayById(local, base, remote, idKey){
+  local = local||[]; base = base||[]; remote = remote||[];
+  const merged = remote.map(deepClone);
+  const baseById  = new Map(base.map(item=>[item[idKey], item]));
+  const localById = new Map(local.map(item=>[item[idKey], item]));
 
   localById.forEach((localItem, id)=>{
     const baseItem = baseById.get(id);
     const changedLocally = !baseItem || !deepEqualJSON(baseItem, localItem);
     if(!changedLocally) return;
-    const idx = mergedArr.findIndex(it=>it[idKey]===id);
+    const idx = merged.findIndex(it=>it[idKey]===id);
     const clone = deepClone(localItem);
-    if(idx>=0) mergedArr[idx] = clone; else mergedArr.push(clone);
+    if(idx>=0) merged[idx] = clone; else merged.push(clone);
   });
-
   baseById.forEach((baseItem, id)=>{
     if(!localById.has(id)){
-      const idx = mergedArr.findIndex(it=>it[idKey]===id);
-      if(idx>=0) mergedArr.splice(idx,1);
+      const idx = merged.findIndex(it=>it[idKey]===id);
+      if(idx>=0) merged.splice(idx,1);
     }
   });
-
-  setPath(merged, path, mergedArr);
+  return merged;
 }
 
-const SYNC_ID_ARRAYS = [
-  { path:["players"], idKey:"id" },
-  { path:["seasonStats","games"], idKey:"id" },
-  { path:["statLibrary"], idKey:"name" },
-];
+// Recursive three-way merge over the plain-JSON state tree (base = last version
+// both sides agreed on, local = this device now, remote = what the server has):
+//   - a path registered in SYNC_ID_ARRAYS merges item-by-item
+//   - a plain object recurses, so one sibling field's local edit isn't lost
+//     just because another sibling changed too (e.g. the live timer vs. a
+//     stat tap under `game` merge independently, not as one all-or-nothing blob)
+//   - anything else (numbers, strings, plain arrays) is atomic: this device's
+//     value wins if it changed since base, otherwise the server's does
+function mergeValue(base, local, remote, path){
+  const key = path.join(".");
+  if(SYNC_ID_ARRAYS[key]) return mergeArrayById(local, base, remote, SYNC_ID_ARRAYS[key]);
+  if(isPlainObj(remote) && isPlainObj(local) && isPlainObj(base)){
+    const merged = {};
+    new Set([...Object.keys(remote), ...Object.keys(local), ...Object.keys(base)]).forEach(k=>{
+      merged[k] = mergeValue(base[k], local[k], remote[k], path.concat(k));
+    });
+    return merged;
+  }
+  return deepEqualJSON(local, base) ? deepClone(remote) : deepClone(local);
+}
 
 function mergeStates(base, local, remote){
   if(!base) return deepClone(remote); // no common ancestor to diff against -> trust the server
-  const merged = deepClone(remote);
-
-  SYNC_ID_ARRAYS.forEach(({path, idKey})=> mergeArrayById(merged, local, base, path, idKey));
-
-  const idArrayRoots = new Set(SYNC_ID_ARRAYS.map(a=>a.path[0]));
-  Object.keys(local).forEach(key=>{
-    if(idArrayRoots.has(key)) return; // handled item-by-item above
-    if(!deepEqualJSON(local[key], base[key])){
-      merged[key] = deepClone(local[key]); // this device changed it since base -> keep that change
-    }
-  });
-
+  const merged = mergeValue(base, local, remote, []);
+  if(merged.game) recomputeStatsFromEvents(merged.game);
   return merged;
 }
 
@@ -1870,6 +1878,39 @@ function findSlotForPlayer(playerId){
   return Object.keys(state.game.onField).find(sid=>state.game.onField[sid]===playerId) || null;
 }
 
+// Every +/- tap on a stat logs an event tagging *when* (half + game clock) and
+// *where* (position on field, if any) it happened, not just a running total —
+// so a season's worth of stats can later be sliced by position or time of game.
+function recordStatEvent(playerId, fieldName, delta){
+  state.game.statEvents = state.game.statEvents || [];
+  const slotId = findSlotForPlayer(playerId);
+  const slot = slotId ? slotsFor(state.formation).find(s=>s.id===slotId) : null;
+  state.game.statEvents.push({
+    id: "se_"+Date.now()+"_"+Math.random().toString(36).slice(2,7),
+    playerId, fieldName, delta,
+    half: state.game.half,
+    atSec: state.game.elapsedSec,
+    position: slot ? slot.cat : null
+  });
+}
+
+// postGameStats is a cache of statEvents' totals. Recomputing it from the
+// event log (rather than trusting whatever synced over) is what keeps two
+// devices tapping stats for different players at the same time from
+// clobbering each other's counts — see mergeStates.
+function recomputeStatsFromEvents(game){
+  const totals = {};
+  (game.statEvents||[]).forEach(ev=>{
+    if(!ev || !ev.playerId || !ev.fieldName) return;
+    totals[ev.playerId] = totals[ev.playerId] || {};
+    totals[ev.playerId][ev.fieldName] = (totals[ev.playerId][ev.fieldName]||0) + (ev.delta||0);
+  });
+  Object.keys(totals).forEach(pid=>{
+    Object.keys(totals[pid]).forEach(f=>{ totals[pid][f] = Math.max(0, totals[pid][f]); });
+  });
+  game.postGameStats = totals;
+}
+
 function recordCurrentPositions(){
   const slots = slotsFor(state.formation);
   slots.forEach(slot=>{
@@ -1879,6 +1920,8 @@ function recordCurrentPositions(){
     if(!state.game.positionsPlayed[pid].includes(slot.cat)){
       state.game.positionsPlayed[pid].push(slot.cat);
     }
+    if(!state.game.positionTime[pid]) state.game.positionTime[pid] = {};
+    state.game.positionTime[pid][slot.cat] = (state.game.positionTime[pid][slot.cat]||0) + 1;
   });
 }
 
@@ -1958,12 +2001,15 @@ function renderPlaytimeList(){
   list.forEach(p=>{
     const t = data[p.id]||0;
     const onField = onFieldIds.has(p.id);
+    const byPos = state.game.positionTime[p.id]||{};
+    const posStr = POS_CATS.filter(cat=>byPos[cat]).map(cat=>cat+" "+fmtMinShort(byPos[cat])).join(" · ");
     const row = document.createElement("div");
     row.className = "summary-row";
     row.innerHTML =
       '<div class="sname"><span class="status-dot'+(onField?" on":"")+'"></span>'+p.name+'</div>'+
       '<div class="bar-wrap"><div class="bar" style="width:'+Math.round(100*t/max)+'%"></div></div>'+
-      '<div class="stime">'+fmtTime(t)+'</div>';
+      '<div class="stime">'+fmtTime(t)+'</div>'+
+      (posStr ? '<div class="note" style="flex:1 0 100%;margin:0;font-size:.78rem;">'+posStr+' (this game)</div>' : '');
     el.appendChild(row);
   });
 }
@@ -2407,6 +2453,7 @@ document.getElementById("saveSeasonStatsBtn").addEventListener("click", async ()
     opponent: state.matchInfo.opponent || "",
     formation: state.formation,
     statFields: (state.game.statFields||[]).slice(),
+    statEvents: (state.game.statEvents||[]).map(ev=>Object.assign({}, ev)),
     playerStats: {}
   };
   presentPlayers().forEach(p=>{
@@ -2414,6 +2461,7 @@ document.getElementById("saveSeasonStatsBtn").addEventListener("click", async ()
       name: p.name,
       minutes: state.game.playTime[p.id]||0,
       positions: (state.game.positionsPlayed[p.id]||[]).slice(),
+      positionSeconds: Object.assign({}, state.game.positionTime[p.id]||{}),
       stats: Object.assign({}, state.game.postGameStats[p.id]||{})
     };
   });
@@ -2690,13 +2738,16 @@ function renderStatEntryModal(){
       '<button type="button" class="stat-btn plus-btn" aria-label="Increase">+</button>';
     row.querySelector(".minus-btn").addEventListener("click",()=>{
       const cur = state.game.postGameStats[pid][fieldName] || 0;
-      state.game.postGameStats[pid][fieldName] = Math.max(0, cur-1);
+      if(cur<=0) return;
+      state.game.postGameStats[pid][fieldName] = cur-1;
+      recordStatEvent(pid, fieldName, -1);
       save();
       renderStatEntryModal();
     });
     row.querySelector(".plus-btn").addEventListener("click",()=>{
       const cur = state.game.postGameStats[pid][fieldName] || 0;
       state.game.postGameStats[pid][fieldName] = cur+1;
+      recordStatEvent(pid, fieldName, 1);
       save();
       renderStatEntryModal();
     });
@@ -2807,6 +2858,8 @@ function openGameDetailModal(gameId){
   }else{
     players.forEach(ps=>{
       const statsStr = Object.entries(ps.stats||{}).filter(([,v])=>v).map(([f,v])=>f+": "+v).join(" · ");
+      const posSecondsStr = POS_CATS.filter(cat=>(ps.positionSeconds||{})[cat])
+        .map(cat=>cat+" "+fmtTime(ps.positionSeconds[cat])).join(" · ");
       const row = document.createElement("div");
       row.style.cssText = "border-bottom:1px solid var(--gray-150);padding:9px 0;";
       row.innerHTML =
@@ -2814,10 +2867,13 @@ function openGameDetailModal(gameId){
         '<div style="font-size:.82rem;color:var(--gray-700);margin-top:2px;">'+
           fmtTime(ps.minutes||0)+' played · '+((ps.positions||[]).join(", ")||"no positions logged")+
         '</div>'+
+        (posSecondsStr ? '<div style="font-size:.78rem;color:var(--gray-700);margin-top:2px;">'+posSecondsStr+'</div>' : '')+
         (statsStr ? '<div style="font-size:.82rem;color:var(--maroon);margin-top:2px;font-weight:600;">'+statsStr+'</div>' : '');
       el.appendChild(row);
     });
   }
+
+  document.getElementById("downloadGameBtn").onclick = ()=> downloadGameCSV(g);
 
   document.getElementById("deleteGameBtn").onclick = ()=>{
     if(!confirm('Remove this saved game ('+(g.date||"undated")+(g.opponent?" vs "+g.opponent:"")+')? This can\'t be undone.')) return;
@@ -2834,6 +2890,47 @@ function closeGameDetailModal(){
 }
 document.getElementById("gameDetailCloseBtn").addEventListener("click", closeGameDetailModal);
 document.getElementById("gameDetailBackdrop").addEventListener("click", closeGameDetailModal);
+
+/* ---- Export: keep games readable outside the app, independent of any future update ---- */
+function csvCell(v){
+  const s = String(v==null ? "" : v);
+  return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+function csvRow(cells){ return cells.map(csvCell).join(",")+"\r\n"; }
+function triggerDownload(filename, content, mime){
+  const blob = new Blob([content], {type: mime});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+function downloadGameCSV(g){
+  const statNames = (g.statFields||[]).length ? g.statFields.slice()
+    : Array.from(new Set(Object.values(g.playerStats||{}).flatMap(ps=>Object.keys(ps.stats||{}))));
+  const header = ["Date","Opponent","Formation","Player","Minutes Played","GK (mm:ss)","DF (mm:ss)","MF (mm:ss)","FW (mm:ss)"]
+    .concat(statNames);
+  let csv = csvRow(header);
+  Object.values(g.playerStats||{}).sort((a,b)=>(b.minutes||0)-(a.minutes||0)).forEach(ps=>{
+    const byPos = ps.positionSeconds||{};
+    const row = [g.date||"", g.opponent||"", g.formation||"", ps.name, fmtTime(ps.minutes||0),
+      fmtTime(byPos.GK||0), fmtTime(byPos.DF||0), fmtTime(byPos.MF||0), fmtTime(byPos.FW||0)]
+      .concat(statNames.map(f=>(ps.stats||{})[f]||0));
+    csv += csvRow(row);
+  });
+  const label = (g.date||"game")+(g.opponent?"_vs_"+g.opponent:"");
+  triggerDownload("subtracker_"+label.replace(/[^a-z0-9_-]+/gi,"_")+".csv", csv, "text/csv");
+}
+function downloadSeasonBackup(){
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    teamName: state.teamName,
+    seasonStats: state.seasonStats || {games:[]}
+  };
+  const stamp = new Date().toISOString().slice(0,10);
+  triggerDownload("subtracker_season_backup_"+stamp+".json", JSON.stringify(payload, null, 2), "application/json");
+}
+document.getElementById("downloadSeasonBtn").addEventListener("click", downloadSeasonBackup);
 
 document.getElementById("statsBtn").addEventListener("click",()=>{
   switchTab("stats");
