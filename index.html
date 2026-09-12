@@ -1765,6 +1765,25 @@ function enableBenchDrag(container, onReorder){
   });
 }
 
+// Self-healing: whenever the Game tab is about to be shown, make sure someone
+// is actually on the field. Previously this only happened inside the
+// goToGameBtn click handler below, so arriving at the Game tab any other way
+// (tapping the Game nav button directly, a confirm() dialog being dismissed/
+// suppressed, reopening the app mid-game) left onField empty with no way to
+// recover except re-entering the lineup. Safe to call anytime: it's a no-op
+// once someone's already on the field.
+function ensureOnFieldSeeded(){
+  if(Object.keys(state.game.onField||{}).length) return;
+  const lineup = state.game.half===2 ? state.lineup2 : state.lineup1;
+  const goalie = state.game.half===2 ? state.goalie2 : state.goalie1;
+  if(!lineup || (!Object.keys(lineup).length && !goalie)) return;
+  state.game.onField = Object.assign({}, lineup);
+  if(goalie) state.game.onField["GK"] = goalie;
+  presentPlayers().forEach(p=>{ if(!(p.id in state.game.playTime)) state.game.playTime[p.id]=0; });
+  recordCurrentPositions();
+  save();
+}
+
 document.getElementById("goToGameBtn").addEventListener("click",()=>{
   const slots = slotsFor(state.formation).filter(s=>s.cat!=="GK");
   const filled = slots.filter(s=>state.lineup1[s.id]).length;
@@ -1774,13 +1793,7 @@ document.getElementById("goToGameBtn").addEventListener("click",()=>{
   if(!state.goalie1){
     if(!confirm("You haven't set a 1st-half goalie. Continue anyway?")) return;
   }
-  // seed live onField from the 1st-half plan, only if the game hasn't started yet
-  if(state.game.elapsedSec===0 && state.game.half===1){
-    state.game.onField = Object.assign({}, state.lineup1);
-    if(state.goalie1) state.game.onField["GK"]=state.goalie1;
-    presentPlayers().forEach(p=>{ if(!(p.id in state.game.playTime)) state.game.playTime[p.id]=0; });
-    recordCurrentPositions();
-  }
+  ensureOnFieldSeeded();
   save();
   switchTab("game");
 });
@@ -1849,6 +1862,7 @@ function beep(freq, dur){
 function doubleBeep(){ beep(880,.25); setTimeout(()=>beep(1046,.3),260); }
 
 function renderGameTab(){
+  ensureOnFieldSeeded();
   applySettingsCollapsedUI();
   applyMatchInfoCollapsedUI();
   document.getElementById("halfBadge").textContent = state.game.half===1 ? "1st Half":"2nd Half";
