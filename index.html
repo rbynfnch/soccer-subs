@@ -1809,8 +1809,8 @@ const subCountSelect = document.getElementById("subCountSelect");
 halfLenSelect.value = state.halfLenMin;
 subFreqSelect.value = state.subFreqMin;
 subCountSelect.value = state.subCount;
-halfLenSelect.addEventListener("change",()=>{ state.halfLenMin=+halfLenSelect.value; save(); });
-subFreqSelect.addEventListener("change",()=>{ state.subFreqMin=+subFreqSelect.value; save(); });
+halfLenSelect.addEventListener("change",()=>{ state.halfLenMin=+halfLenSelect.value; save(); updateClockDisplay(); updateSubClock(); });
+subFreqSelect.addEventListener("change",()=>{ state.subFreqMin=+subFreqSelect.value; save(); updateSubClock(); });
 subCountSelect.addEventListener("change",()=>{ state.subCount=+subCountSelect.value; save(); });
 
 document.getElementById("gameSettingsHeader").addEventListener("click",()=>{
