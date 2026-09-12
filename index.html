@@ -974,13 +974,27 @@ function load(){
 /* ============ Live sync (Netlify Blobs via /api/sync) ============
    Opt-in: only active once the coach starts or joins a shared game.
    Push: every local save() schedules a debounced push of the whole state.
-   Pull: polls every ~2.5s and adopts the remote state if it's newer than
-   whatever we last applied, so multiple devices converge on one shared game. */
+   Pull: polls every ~2.5s and adopts remote changes.
+
+   Conflict handling: the server only accepts a push when this device's
+   baseUpdatedAt matches what it actually has stored (see netlify/functions/sync.js).
+   On a conflict — or on a poll that pulls in a newer remote version while this
+   device still has edits it hasn't pushed yet — we three-way-merge instead of
+   letting one side's full snapshot blindly replace the other's:
+     base   = syncBaseState, the last version both this device and the server agreed on
+     local  = state, what's on this device right now
+     remote = whatever the server actually has
+   Roster, saved games, and the stat library merge item-by-item by id, so an
+   edit to one player/game/stat on one device can't erase an unrelated edit
+   made on another. Everything else (the live game/timer/lineup) merges as a
+   whole field: whichever device touched it more recently relative to its own
+   last sync keeps its copy — safer than splicing a running timer apart. */
 const SYNC_ENDPOINT = "/api/sync";
 const SYNC_CODE_KEY = "subTrackerSyncCode";
 const SYNC_DEVICE_KEY = "subTrackerDeviceId";
 const SYNC_PUSH_DEBOUNCE_MS = 800;
 const SYNC_PULL_INTERVAL_MS = 2500;
+const SYNC_MAX_PUSH_ATTEMPTS = 4;
 
 let syncCode = localStorage.getItem(SYNC_CODE_KEY) || null;
 let syncDeviceId = localStorage.getItem(SYNC_DEVICE_KEY);
@@ -988,10 +1002,14 @@ if(!syncDeviceId){
   syncDeviceId = "dev_"+Math.random().toString(36).slice(2,10);
   localStorage.setItem(SYNC_DEVICE_KEY, syncDeviceId);
 }
-let syncLastApplied = 0;
+// The last {state,updatedAt} this device knows the server actually holds.
+// null/0 until the first successful push/pull/join for the current syncCode.
+let syncBaseState = null;
+let syncBaseUpdatedAt = 0;
 let syncPushTimer = null;
 let syncPollHandle = null;
 let syncPullInFlight = false;
+let syncPushInFlight = false;
 
 function genGameCode(){
   const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L ambiguity
@@ -1017,20 +1035,117 @@ function scheduleSyncPush(){
   syncPushTimer = setTimeout(syncPush, SYNC_PUSH_DEBOUNCE_MS);
 }
 
+function deepClone(v){ return v==null ? v : JSON.parse(JSON.stringify(v)); }
+function deepEqualJSON(a,b){ return JSON.stringify(a)===JSON.stringify(b); }
+function getPath(obj, path){ return path.reduce((o,k)=> (o==null?o:o[k]), obj); }
+function setPath(obj, path, val){
+  let o = obj;
+  for(let i=0;i<path.length-1;i++){
+    if(o[path[i]]==null) o[path[i]] = {};
+    o = o[path[i]];
+  }
+  o[path[path.length-1]] = val;
+}
+
+// Union-merges an id-keyed array field of `merged` (which starts as a clone of
+// remote): an item this device added or edited since `base` wins for that item;
+// an item this device deleted since `base` is removed too; anything only the
+// other device touched passes through from remote untouched.
+function mergeArrayById(merged, local, base, path, idKey){
+  const localArr = getPath(local, path) || [];
+  const baseArr  = getPath(base, path)  || [];
+  const mergedArr = (getPath(merged, path) || []).slice();
+
+  const baseById  = new Map(baseArr.map(item=>[item[idKey], item]));
+  const localById = new Map(localArr.map(item=>[item[idKey], item]));
+
+  localById.forEach((localItem, id)=>{
+    const baseItem = baseById.get(id);
+    const changedLocally = !baseItem || !deepEqualJSON(baseItem, localItem);
+    if(!changedLocally) return;
+    const idx = mergedArr.findIndex(it=>it[idKey]===id);
+    const clone = deepClone(localItem);
+    if(idx>=0) mergedArr[idx] = clone; else mergedArr.push(clone);
+  });
+
+  baseById.forEach((baseItem, id)=>{
+    if(!localById.has(id)){
+      const idx = mergedArr.findIndex(it=>it[idKey]===id);
+      if(idx>=0) mergedArr.splice(idx,1);
+    }
+  });
+
+  setPath(merged, path, mergedArr);
+}
+
+const SYNC_ID_ARRAYS = [
+  { path:["players"], idKey:"id" },
+  { path:["seasonStats","games"], idKey:"id" },
+  { path:["statLibrary"], idKey:"name" },
+];
+
+function mergeStates(base, local, remote){
+  if(!base) return deepClone(remote); // no common ancestor to diff against -> trust the server
+  const merged = deepClone(remote);
+
+  SYNC_ID_ARRAYS.forEach(({path, idKey})=> mergeArrayById(merged, local, base, path, idKey));
+
+  const idArrayRoots = new Set(SYNC_ID_ARRAYS.map(a=>a.path[0]));
+  Object.keys(local).forEach(key=>{
+    if(idArrayRoots.has(key)) return; // handled item-by-item above
+    if(!deepEqualJSON(local[key], base[key])){
+      merged[key] = deepClone(local[key]); // this device changed it since base -> keep that change
+    }
+  });
+
+  return merged;
+}
+
 async function syncPush(){
-  if(!syncCode) return;
-  const payload = { state, updatedAt: Date.now(), deviceId: syncDeviceId };
+  if(!syncCode || syncPushInFlight) return;
+  syncPushInFlight = true;
+  clearTimeout(syncPushTimer);
   try{
-    syncLastApplied = payload.updatedAt;
-    const res = await fetch(SYNC_ENDPOINT+"?code="+encodeURIComponent(syncCode), {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify(payload)
-    });
-    if(!res.ok) throw new Error("push failed");
-    setSyncStatus("ok", "Synced just now · Code "+syncCode);
-  }catch(e){
-    setSyncStatus("error", "Couldn't reach the shared game — will keep retrying · Code "+syncCode);
+    for(let attempt=0; attempt<SYNC_MAX_PUSH_ATTEMPTS; attempt++){
+      const sentState = deepClone(state); // snapshot now, before the network round-trip
+      const updatedAt = Date.now();
+      let res;
+      try{
+        res = await fetch(SYNC_ENDPOINT+"?code="+encodeURIComponent(syncCode), {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ state: sentState, updatedAt, deviceId: syncDeviceId, baseUpdatedAt: syncBaseUpdatedAt })
+        });
+      }catch(e){
+        setSyncStatus("error", "Couldn't reach the shared game — will keep retrying · Code "+syncCode);
+        return;
+      }
+      if(res.status === 409){
+        const conflict = await res.json();
+        state = mergeStates(syncBaseState, state, conflict.state);
+        try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+        syncBaseState = deepClone(conflict.state);
+        syncBaseUpdatedAt = conflict.updatedAt;
+        refreshAllViewsAfterRemoteUpdate();
+        continue; // retry the push with the merged state on top of the fresh base
+      }
+      if(!res.ok){
+        setSyncStatus("error", "Couldn't reach the shared game — will keep retrying · Code "+syncCode);
+        return;
+      }
+      syncBaseState = sentState;
+      syncBaseUpdatedAt = updatedAt;
+      setSyncStatus("ok", "Synced just now · Code "+syncCode);
+      if(!deepEqualJSON(sentState, state)){
+        // more edits landed while that push was in flight -> send those too
+        scheduleSyncPush();
+      }
+      return;
+    }
+    setSyncStatus("error", "Couldn't sync — another device keeps editing at the same moment. Will retry · Code "+syncCode);
+    scheduleSyncPush();
+  }finally{
+    syncPushInFlight = false;
   }
 }
 
@@ -1041,12 +1156,15 @@ async function syncPull(){
     const res = await fetch(SYNC_ENDPOINT+"?code="+encodeURIComponent(syncCode));
     if(!res.ok) throw new Error("pull failed");
     const data = await res.json();
-    if(data && typeof data.updatedAt === "number" && data.updatedAt > syncLastApplied){
-      syncLastApplied = data.updatedAt;
-      state = data.state;
+    if(data && typeof data.updatedAt === "number" && data.updatedAt > syncBaseUpdatedAt){
+      const localDirty = !!syncBaseState && !deepEqualJSON(state, syncBaseState);
+      state = localDirty ? mergeStates(syncBaseState, state, data.state) : deepClone(data.state);
       try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+      syncBaseState = deepClone(data.state);
+      syncBaseUpdatedAt = data.updatedAt;
       refreshAllViewsAfterRemoteUpdate();
       setSyncStatus("ok", "Updated from another device · Code "+syncCode);
+      if(localDirty) scheduleSyncPush(); // this device had unsaved edits -> push the merged result back
     }else{
       setSyncStatus("ok", "Synced · Code "+syncCode);
     }
@@ -1100,7 +1218,8 @@ document.getElementById("startSharedGameBtn").addEventListener("click", async ()
   const code = genGameCode();
   syncCode = code;
   localStorage.setItem(SYNC_CODE_KEY, code);
-  syncLastApplied = 0;
+  syncBaseState = null;
+  syncBaseUpdatedAt = 0;
   updateSyncUI();
   await syncPush(); // seed the shared game with this device's current data
   startSyncPolling();
@@ -1121,8 +1240,9 @@ document.getElementById("joinSharedGameBtn").addEventListener("click", async ()=
     }
     syncCode = code;
     localStorage.setItem(SYNC_CODE_KEY, code);
-    syncLastApplied = data.updatedAt || 0;
-    state = data.state;
+    state = deepClone(data.state);
+    syncBaseState = deepClone(data.state);
+    syncBaseUpdatedAt = data.updatedAt || 0;
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
     refreshAllViewsAfterRemoteUpdate();
     updateSyncUI();
@@ -1139,6 +1259,8 @@ document.getElementById("leaveSharedGameBtn").addEventListener("click", ()=>{
   stopSyncPolling();
   syncCode = null;
   localStorage.removeItem(SYNC_CODE_KEY);
+  syncBaseState = null;
+  syncBaseUpdatedAt = 0;
   updateSyncUI();
 });
 
