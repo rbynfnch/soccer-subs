@@ -1197,6 +1197,7 @@ function refreshAllViewsAfterRemoteUpdate(){
   if(statsActive) renderStatsPage();
   if(manageActive) renderManageStatsList();
   updateSyncUI();
+  syncTickingToRunningState();
 }
 
 function startSyncPolling(){
@@ -1851,6 +1852,26 @@ let selectedBenchId = null;
 let timerHandle = null;
 let audioCtx = null;
 
+// Browsers only let an AudioContext actually make sound if it was created (or
+// resumed) inside a real tap/click. tick() runs on a setInterval — no gesture —
+// so if the AudioContext gets lazily created there instead, sub alerts and the
+// halftime/fulltime beep go silently mute with no error. Call this from a real
+// button handler first so the context is already running by the time tick() beeps.
+function unlockAudio(){
+  try{
+    audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state === "suspended") audioCtx.resume();
+  }catch(e){}
+}
+// A device following a shared game never personally taps Start — its own tick()
+// (and sub-alert beep) gets kicked off by a sync update, not a click. So unlock
+// on this device's very first tap anywhere in the app, not just the Start button.
+document.addEventListener("pointerdown", unlockAudio, {once:true});
+// iOS suspends the AudioContext whenever the screen locks or the tab backgrounds —
+// a very likely thing to happen to a phone propped up on the sideline — so try to
+// wake it back up every time the tab becomes visible again, not just once ever.
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) unlockAudio(); });
+
 function beep(freq, dur){
   try{
     audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
@@ -2274,6 +2295,7 @@ function cleanPlannedSubs(){
 
 /* ---- Timer ---- */
 document.getElementById("startPauseBtn").addEventListener("click",()=>{
+  unlockAudio(); // must happen inside a real tap, or the later alert/halftime beep gets silently blocked
   state.game.running = !state.game.running;
   if(state.game.running) startTicking(); else stopTicking();
   save();
@@ -2293,6 +2315,14 @@ function startTicking(){
 }
 function stopTicking(){
   if(timerHandle){ clearInterval(timerHandle); timerHandle=null; }
+}
+// Every device that's synced to this game — not just whichever one tapped Start —
+// needs its own local tick() running so the clock counts down smoothly (once a
+// second, not just whenever a sync happens to land) and so every phone actually
+// plays its own sub alert at the right moment instead of only the driver's.
+function syncTickingToRunningState(){
+  if(state.game.running && !timerHandle) startTicking();
+  else if(!state.game.running && timerHandle) stopTicking();
 }
 function tick(){
   state.game.elapsedSec += 1;
@@ -2956,6 +2986,7 @@ document.getElementById("statsBtn").addEventListener("click",()=>{
 renderRoster();
 renderLineupTab();
 renderGameTab();
+syncTickingToRunningState(); // resume the local clock if this device reloaded mid-game
 window.addEventListener("beforeunload",save);
 
 })();
