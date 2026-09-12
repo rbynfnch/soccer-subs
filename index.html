@@ -611,6 +611,8 @@
         <p class="note" style="margin:0 0 10px;">Full time — head to the Stats page to review minutes and save today's game.</p>
         <button class="btn btn-gold btn-block" id="goToStatsBtn">View Stats &amp; Save Game</button>
       </div>
+      <button class="btn btn-outline btn-block" id="resetGameStatsBtn" style="margin-top:10px; color:var(--maroon); border-color:var(--maroon);">Reset Game Time &amp; Stats</button>
+      <p class="note" style="margin:6px 0 0;">For debugging — wipes the timer, minutes, and stats for this game only. Your roster and lineup stay put.</p>
     </div>
 
     <div class="card">
@@ -643,6 +645,13 @@
     </div>
 
     <div class="card">
+      <h2>On the Field <small>Tap a player, then tap a bench player to swap them anytime. A small "OUT" badge means she's queued in your sub plan.</small></h2>
+      <div class="pitch-wrap" id="gamePitch">
+        <div class="box bottom"></div><div class="box top"></div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Playing Time <small>Sorted highest to lowest — use this to spot who's due for a rest, at a glance.</small></h2>
       <div class="half-toggle" id="playtimeViewToggle" style="margin-bottom:10px;">
         <button class="half-toggle-btn" data-view="half1">1st Half</button>
@@ -651,13 +660,6 @@
       </div>
       <div class="note" style="margin:0 0 8px;"><span class="status-dot on" style="display:inline-block;vertical-align:middle;margin-right:4px;"></span>on field &nbsp;&nbsp;<span class="status-dot" style="display:inline-block;vertical-align:middle;margin-right:4px;"></span>bench</div>
       <div id="playtimeList"></div>
-    </div>
-
-    <div class="card">
-      <h2>On the Field <small>Tap a player, then tap a bench player to swap them anytime. A small "OUT" badge means she's queued in your sub plan.</small></h2>
-      <div class="pitch-wrap" id="gamePitch">
-        <div class="box bottom"></div><div class="box top"></div>
-      </div>
     </div>
 
   </section>
@@ -1851,25 +1853,42 @@ let selectedSlotId = null;
 let selectedBenchId = null;
 let timerHandle = null;
 let audioCtx = null;
+let alarmAudio = null;
+const ALARM_SRC = "sounds/sub-alarm.mp3";
+// Full volume, never boosted past 1.0 (HTML5 audio's own ceiling) — loud as the
+// clip allows without amplifying past that and clipping/distorting.
+const ALARM_VOLUME = 1.0;
+// Long, insistent buzz-pause-buzz pattern (~7s) so it's impossible to miss even
+// with the phone in a pocket — roughly matches playing the alarm clip twice over.
+const ALARM_VIBRATE_PATTERN = [500,150,500,150,500,150,500,150,500,150,500,150,500,150,500,150];
 
-// Browsers only let an AudioContext actually make sound if it was created (or
-// resumed) inside a real tap/click. tick() runs on a setInterval — no gesture —
-// so if the AudioContext gets lazily created there instead, sub alerts and the
-// halftime/fulltime beep go silently mute with no error. Call this from a real
-// button handler first so the context is already running by the time tick() beeps.
+// Browsers only let audio actually make sound if it was created/resumed/primed
+// inside a real tap/click. tick() runs on a setInterval — no gesture — so if the
+// alarm gets lazily created there instead, it can go silently mute with no error.
+// Call this from a real button handler first so it's already unlocked by the
+// time tick() needs to fire it.
 function unlockAudio(){
   try{
     audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
     if(audioCtx.state === "suspended") audioCtx.resume();
   }catch(e){}
+  try{
+    if(!alarmAudio){ alarmAudio = new Audio(ALARM_SRC); alarmAudio.preload = "auto"; }
+    // silent priming play-then-pause, a standard trick to unlock an <audio>
+    // element for later JS-triggered playback with no fresh gesture
+    const vol = alarmAudio.volume;
+    alarmAudio.volume = 0;
+    const p = alarmAudio.play();
+    if(p && p.then) p.then(()=>{ alarmAudio.pause(); alarmAudio.currentTime = 0; alarmAudio.volume = vol; }).catch(()=>{ alarmAudio.volume = vol; });
+  }catch(e){}
 }
 // A device following a shared game never personally taps Start — its own tick()
-// (and sub-alert beep) gets kicked off by a sync update, not a click. So unlock
+// (and sub-alert alarm) gets kicked off by a sync update, not a click. So unlock
 // on this device's very first tap anywhere in the app, not just the Start button.
 document.addEventListener("pointerdown", unlockAudio, {once:true});
-// iOS suspends the AudioContext whenever the screen locks or the tab backgrounds —
-// a very likely thing to happen to a phone propped up on the sideline — so try to
-// wake it back up every time the tab becomes visible again, not just once ever.
+// iOS suspends audio whenever the screen locks or the tab backgrounds — a very
+// likely thing to happen to a phone propped up on the sideline — so try to wake
+// it back up every time the tab becomes visible again, not just once ever.
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) unlockAudio(); });
 
 function beep(freq, dur){
@@ -1885,6 +1904,27 @@ function beep(freq, dur){
   }catch(e){}
 }
 function doubleBeep(){ beep(880,.25); setTimeout(()=>beep(1046,.3),260); }
+
+// The real sub/halftime/fulltime alert: the alarm clip played twice at full
+// volume, plus a long vibration — falls back to the old oscillator beep only if
+// the clip itself fails to play (blocked, missing, bad connection on the sideline).
+function playAlarm(){
+  try{
+    if(!alarmAudio){ alarmAudio = new Audio(ALARM_SRC); alarmAudio.preload = "auto"; }
+    alarmAudio.pause();
+    alarmAudio.volume = ALARM_VOLUME;
+    alarmAudio.currentTime = 0;
+    let plays = 0;
+    alarmAudio.onended = ()=>{
+      plays++;
+      if(plays<2){ alarmAudio.currentTime = 0; alarmAudio.play().catch(()=>{}); }
+      else alarmAudio.onended = null;
+    };
+    const p = alarmAudio.play();
+    if(p && p.catch) p.catch(doubleBeep);
+  }catch(e){ doubleBeep(); }
+  try{ if(navigator.vibrate) navigator.vibrate(ALARM_VIBRATE_PATTERN); }catch(e){}
+}
 
 function renderGameTab(){
   ensureOnFieldSeeded();
@@ -2308,6 +2348,17 @@ document.getElementById("resetTimerBtn").addEventListener("click",()=>{
   state.game.lastSubSec=0;
   save(); renderGameTab();
 });
+document.getElementById("resetGameStatsBtn").addEventListener("click",()=>{
+  if(!confirm("Reset this game's timer, minutes, and stats? Your roster and lineup are not touched. This can't be undone.")) return;
+  stopTicking();
+  state.game = defaultState().game;
+  ensureOnFieldSeeded(); // repopulate the field from the still-intact lineup
+  pendingSwaps = [];
+  document.getElementById("subAlertBox").style.display = "none";
+  save();
+  renderGameTab();
+  renderStatPlayerRows();
+});
 
 function startTicking(){
   stopTicking();
@@ -2346,7 +2397,7 @@ function tick(){
     stopTicking();
     if(state.game.half===1){ state.game.halftimeShown=true; }
     else{ state.game.fulltimeShown=true; }
-    doubleBeep();
+    playAlarm();
   }
   updateClockDisplay();
   updateSubClock();
@@ -2396,7 +2447,7 @@ function triggerSubAlert(){
   const alertBox = document.getElementById("subAlertBox");
   alertBox.style.display = pendingSwaps.length ? "block":"none";
   if(pendingSwaps.length){
-    doubleBeep();
+    playAlarm();
     // the box can render far from wherever the coach is scrolled — bring it into view every time
     alertBox.scrollIntoView({behavior:"smooth", block:"center"});
   }
