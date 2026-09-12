@@ -353,9 +353,11 @@
   }
   .stat-btn:active{background:var(--maroon);color:#fff;}
   .stat-center{flex:1;text-align:center;padding:0 4px;min-width:0;}
+  .stat-center.has-desc{cursor:pointer;}
   .stat-center .stat-name{font-weight:700;font-size:.76rem;color:var(--gray-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .stat-center .stat-count{font-size:1.3rem;color:var(--maroon);line-height:1.1;margin:1px 0;}
-  .stat-center .stat-desc{font-size:.62rem;color:var(--gray-500);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .stat-center .stat-desc{display:none;font-size:.66rem;color:var(--gray-500);font-weight:500;white-space:normal;margin-top:2px;}
+  .stat-row.show-desc .stat-desc{display:block;}
 
   /* Advance sub planning */
   .plan-row{
@@ -2739,26 +2741,31 @@ function renderStatEntryModal(){
     row.className = "stat-row";
     row.innerHTML =
       '<button type="button" class="stat-btn minus-btn" aria-label="Decrease">−</button>'+
-      '<div class="stat-center">'+
+      '<div class="stat-center'+(desc?" has-desc":"")+'">'+
         '<div class="stat-name">'+fieldName+'</div>'+
         '<div class="stat-count display-num">'+val+'</div>'+
         (desc ? '<div class="stat-desc">'+desc+'</div>' : '')+
       '</div>'+
       '<button type="button" class="stat-btn plus-btn" aria-label="Increase">+</button>';
+    if(desc){
+      row.querySelector(".stat-center").addEventListener("click",()=>{
+        row.classList.toggle("show-desc");
+      });
+    }
     row.querySelector(".minus-btn").addEventListener("click",()=>{
       const cur = state.game.postGameStats[pid][fieldName] || 0;
       if(cur<=0) return;
       state.game.postGameStats[pid][fieldName] = cur-1;
       recordStatEvent(pid, fieldName, -1);
       save();
-      renderStatEntryModal();
+      closeStatEntryModal();
     });
     row.querySelector(".plus-btn").addEventListener("click",()=>{
       const cur = state.game.postGameStats[pid][fieldName] || 0;
       state.game.postGameStats[pid][fieldName] = cur+1;
       recordStatEvent(pid, fieldName, 1);
       save();
-      renderStatEntryModal();
+      closeStatEntryModal();
     });
     listEl.appendChild(row);
   });
