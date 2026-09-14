@@ -1009,6 +1009,14 @@ const SYNC_DEVICE_KEY = "subTrackerDeviceId";
 const SYNC_PUSH_DEBOUNCE_MS = 800;
 const SYNC_PULL_INTERVAL_MS = 2500;
 const SYNC_MAX_PUSH_ATTEMPTS = 4;
+// A shared game code stays in localStorage until you explicitly leave it, so
+// every page load used to poll /api/sync every 2.5s forever — including a PWA
+// just sitting backgrounded on a phone, burning Netlify function invocations
+// for nobody. Now polling only actually runs while the tab is visible AND
+// you've touched something in the last few minutes; it stops the instant the
+// tab is hidden and picks back up the moment you tap anything or return to it.
+const SYNC_IDLE_MS = 3*60*1000;
+let syncIdleTimer = null;
 
 let syncCode = localStorage.getItem(SYNC_CODE_KEY) || null;
 let syncDeviceId = localStorage.getItem(SYNC_DEVICE_KEY);
@@ -1206,11 +1214,37 @@ function startSyncPolling(){
   if(syncPollHandle) clearInterval(syncPollHandle);
   syncPollHandle = setInterval(syncPull, SYNC_PULL_INTERVAL_MS);
   syncPull();
+  armSyncIdleTimer();
 }
-function stopSyncPolling(){
+// Stops the polling requests only — leaves any already-scheduled push alone, so
+// an edit made right before the phone gets put down still goes out.
+function pausePolling(){
   if(syncPollHandle){ clearInterval(syncPollHandle); syncPollHandle=null; }
+  clearTimeout(syncIdleTimer);
+}
+// Full teardown, for actually leaving the shared game.
+function stopSyncPolling(){
+  pausePolling();
   clearTimeout(syncPushTimer);
 }
+function armSyncIdleTimer(){
+  clearTimeout(syncIdleTimer);
+  if(!syncCode) return;
+  syncIdleTimer = setTimeout(()=>{
+    pausePolling();
+    setSyncStatus("ok", "Paused while idle — tap anything to resume · Code "+syncCode);
+  }, SYNC_IDLE_MS);
+}
+function resumeSyncIfNeeded(){
+  if(!syncCode || document.hidden) return;
+  if(!syncPollHandle) startSyncPolling();
+  else armSyncIdleTimer();
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(!syncCode) return;
+  if(document.hidden) pausePolling(); else resumeSyncIfNeeded();
+});
+["pointerdown","keydown"].forEach(evt=>document.addEventListener(evt, resumeSyncIfNeeded));
 
 function updateSyncUI(){
   const notConnected = document.getElementById("syncNotConnected");
@@ -1304,6 +1338,7 @@ document.getElementById("syncBackdrop").addEventListener("click", closeSyncModal
 if(syncCode){
   updateSyncUI();
   startSyncPolling();
+  if(document.hidden) pausePolling(); // loaded in a background tab — don't poll until it's actually shown
 }
 /* ============ end live sync ============ */
 
